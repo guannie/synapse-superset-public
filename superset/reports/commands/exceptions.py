@@ -21,6 +21,7 @@ from superset.commands.exceptions import (
     CommandInvalidError,
     CreateFailedError,
     DeleteFailedError,
+    ForbiddenError,
     ValidationError,
 )
 
@@ -111,6 +112,10 @@ class ReportScheduleScreenshotFailedError(CommandException):
     message = _("Report Schedule execution failed when generating a screenshot.")
 
 
+class ReportScheduleCsvFailedError(CommandException):
+    message = _("Report Schedule execution failed when generating a csv.")
+
+
 class ReportScheduleExecuteUnexpectedError(CommandException):
     message = _("Report Schedule execution got an unexpected error.")
 
@@ -125,7 +130,7 @@ class ReportScheduleWorkingTimeoutError(CommandException):
 
 class ReportScheduleNameUniquenessValidationError(ValidationError):
     """
-    Marshmallow validation error for Report Schedule name already exists
+    Marshmallow validation error for Report Schedule name and type already exists
     """
 
     def __init__(self) -> None:
@@ -150,6 +155,22 @@ class AlertQueryInvalidTypeError(CommandException):
     message = _("Alert query returned a non-number value.")
 
 
+class AlertQueryError(CommandException):
+    message = _("Alert found an error while executing a query.")
+
+
+class AlertQueryTimeout(CommandException):
+    message = _("A timeout occurred while executing the query.")
+
+
+class ReportScheduleScreenshotTimeout(CommandException):
+    message = _("A timeout occurred while taking a screenshot.")
+
+
+class ReportScheduleCsvTimeout(CommandException):
+    message = _("A timeout occurred while generating a csv.")
+
+
 class ReportScheduleAlertGracePeriodError(CommandException):
     message = _("Alert fired during grace period.")
 
@@ -172,3 +193,11 @@ class ReportScheduleStateNotFoundError(CommandException):
 
 class ReportScheduleUnexpectedError(CommandException):
     message = _("Report schedule unexpected error")
+
+
+class ReportScheduleForbiddenError(ForbiddenError):
+    message = _("Changing this report is forbidden")
+
+
+class ReportSchedulePruneLogError(CommandException):
+    message = _("An error occurred while pruning logs ")

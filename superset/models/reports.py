@@ -17,7 +17,9 @@
 """A collection of ORM sqlalchemy models for Superset"""
 import enum
 
+from cron_descriptor import get_description
 from flask_appbuilder import Model
+from flask_appbuilder.models.decorators import renders
 from sqlalchemy import (
     Boolean,
     Column,
@@ -31,6 +33,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.orm import backref, relationship
 from sqlalchemy.schema import UniqueConstraint
+from sqlalchemy_utils import UUIDType
 
 from superset.extensions import security_manager
 from superset.models.core import Database
@@ -66,9 +69,9 @@ class ReportState(str, enum.Enum):
     GRACE = "On Grace"
 
 
-class ReportEmailFormat(str, enum.Enum):
-    VISUALIZATION = "Visualization"
-    DATA = "Raw data"
+class ReportDataFormat(str, enum.Enum):
+    VISUALIZATION = "PNG"
+    DATA = "CSV"
 
 
 report_schedule_user = Table(
@@ -90,13 +93,16 @@ class ReportSchedule(Model, AuditMixinNullable):
     """
 
     __tablename__ = "report_schedule"
+    __table_args__ = (UniqueConstraint("name", "type"),)
+
     id = Column(Integer, primary_key=True)
     type = Column(String(50), nullable=False)
-    name = Column(String(150), nullable=False, unique=True)
+    name = Column(String(150), nullable=False)
     description = Column(Text)
     context_markdown = Column(Text)
     active = Column(Boolean, default=True, index=True)
-    crontab = Column(String(50), nullable=False)
+    crontab = Column(String(1000), nullable=False)
+    report_format = Column(String(50), default=ReportDataFormat.VISUALIZATION)
     sql = Column(Text())
     # (Alerts/Reports) M-O to chart
     chart_id = Column(Integer, ForeignKey("slices.id"), nullable=True)
@@ -131,6 +137,10 @@ class ReportSchedule(Model, AuditMixinNullable):
     def __repr__(self) -> str:
         return str(self.name)
 
+    @renders("crontab")
+    def crontab_humanized(self) -> str:
+        return get_description(self.crontab)
+
 
 class ReportRecipients(
     Model, AuditMixinNullable
@@ -163,6 +173,7 @@ class ReportExecutionLog(Model):  # pylint: disable=too-few-public-methods
 
     __tablename__ = "report_execution_log"
     id = Column(Integer, primary_key=True)
+    uuid = Column(UUIDType(binary=True))
 
     # Timestamps
     scheduled_dttm = Column(DateTime, nullable=False)

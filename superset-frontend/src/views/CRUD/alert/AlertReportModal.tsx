@@ -17,20 +17,40 @@
  * under the License.
  */
 import React, { FunctionComponent, useState, useEffect } from 'react';
-import { styled, t, SupersetClient } from '@superset-ui/core';
+import {
+  styled,
+  t,
+  SupersetClient,
+  css,
+  SupersetTheme,
+} from '@superset-ui/core';
 import rison from 'rison';
 import { useSingleViewResource } from 'src/views/CRUD/hooks';
 
-import Icon from 'src/components/Icon';
-import Modal from 'src/common/components/Modal';
-import { Switch } from 'src/common/components/Switch';
-import { Select } from 'src/common/components/Select';
-import { Radio } from 'src/common/components/Radio';
-import { AsyncSelect } from 'src/components/Select';
+import Icons from 'src/components/Icons';
+import { Switch } from 'src/components/Switch';
+import Modal from 'src/components/Modal';
+import { Radio } from 'src/components/Radio';
+import { AsyncSelect, NativeGraySelect as Select } from 'src/components/Select';
+import { FeatureFlag, isFeatureEnabled } from 'src/featureFlags';
 import withToasts from 'src/messageToasts/enhancers/withToasts';
-
 import Owner from 'src/types/Owner';
-import { AlertObject, Operator, Recipient, MetaObject } from './types';
+import TextAreaControl from 'src/explore/components/controls/TextAreaControl';
+import { AlertReportCronScheduler } from './components/AlertReportCronScheduler';
+import { NotificationMethod } from './components/NotificationMethod';
+
+import {
+  AlertObject,
+  ChartObject,
+  DashboardObject,
+  DatabaseObject,
+  MetaObject,
+  Operator,
+  Recipient,
+} from './types';
+
+const SELECT_PAGE_SIZE = 2000; // temporary fix for paginated query
+const TIMEOUT_MIN = 1;
 
 type SelectValue = {
   value: string;
@@ -47,7 +67,7 @@ interface AlertReportModalProps {
 }
 
 const NOTIFICATION_METHODS: NotificationMethod[] = ['Email', 'Slack'];
-
+const DEFAULT_NOTIFICATION_FORMAT = 'PNG';
 const CONDITIONS = [
   {
     label: t('< (Smaller than)'),
@@ -66,12 +86,16 @@ const CONDITIONS = [
     value: '>=',
   },
   {
-    label: t('== (Is Equal)'),
+    label: t('== (Is equal)'),
     value: '==',
   },
   {
-    label: t('!= (Is Not Equal)'),
+    label: t('!= (Is not equal)'),
     value: '!=',
+  },
+  {
+    label: t('Not null'),
+    value: 'not null',
   },
 ];
 
@@ -96,9 +120,30 @@ const RETENTION_OPTIONS = [
 
 const DEFAULT_RETENTION = 90;
 const DEFAULT_WORKING_TIMEOUT = 3600;
+const DEFAULT_CRON_VALUE = '0 * * * *'; // every hour
+const DEFAULT_ALERT = {
+  active: true,
+  crontab: DEFAULT_CRON_VALUE,
+  log_retention: DEFAULT_RETENTION,
+  working_timeout: DEFAULT_WORKING_TIMEOUT,
+  name: '',
+  owners: [],
+  recipients: [],
+  sql: '',
+  validator_config_json: {},
+  validator_type: '',
+  grace_period: undefined,
+};
 
-const StyledIcon = styled(Icon)`
-  margin: auto ${({ theme }) => theme.gridUnit * 2}px auto 0;
+const StyledModal = styled(Modal)`
+  .ant-modal-body {
+    overflow: initial;
+  }
+`;
+
+const StyledIcon = (theme: SupersetTheme) => css`
+  margin: auto ${theme.gridUnit * 2}px auto 0;
+  color: ${theme.colors.grayscale.base};
 `;
 
 const StyledSectionContainer = styled.div`
@@ -121,7 +166,7 @@ const StyledSectionContainer = styled.div`
 
     .column {
       flex: 1 1 auto;
-      min-width: 33.33%;
+      min-width: calc(33.33% - ${({ theme }) => theme.gridUnit * 8}px);
       padding: ${({ theme }) => theme.gridUnit * 4}px;
 
       .async-select {
@@ -142,6 +187,9 @@ const StyledSectionContainer = styled.div`
     display: flex;
     flex-direction: row;
     align-items: center;
+    &.wrap {
+      flex-wrap: wrap;
+    }
 
     > div {
       flex: 1 1 auto;
@@ -166,8 +214,19 @@ const StyledSectionContainer = styled.div`
 `;
 
 const StyledSectionTitle = styled.div`
+  display: flex;
+  align-items: center;
   margin: ${({ theme }) => theme.gridUnit * 2}px auto
     ${({ theme }) => theme.gridUnit * 4}px auto;
+
+  h4 {
+    margin: 0;
+  }
+
+  .required {
+    margin-left: ${({ theme }) => theme.gridUnit}px;
+    color: ${({ theme }) => theme.colors.error.base};
+  }
 `;
 
 const StyledSwitchContainer = styled.div`
@@ -180,10 +239,18 @@ const StyledSwitchContainer = styled.div`
   }
 `;
 
-const StyledInputContainer = styled.div`
+export const StyledInputContainer = styled.div`
   flex: 1 1 auto;
   margin: ${({ theme }) => theme.gridUnit * 2}px;
   margin-top: 0;
+
+  .helper {
+    display: block;
+    color: ${({ theme }) => theme.colors.grayscale.base};
+    font-size: ${({ theme }) => theme.typography.sizes.s - 1}px;
+    padding: ${({ theme }) => theme.gridUnit}px 0;
+    text-align: left;
+  }
 
   .required {
     margin-left: ${({ theme }) => theme.gridUnit / 2}px;
@@ -193,6 +260,10 @@ const StyledInputContainer = styled.div`
   .input-container {
     display: flex;
     align-items: center;
+
+    > div {
+      width: 100%;
+    }
 
     label {
       display: flex;
@@ -211,8 +282,12 @@ const StyledInputContainer = styled.div`
     flex: 1 1 auto;
   }
 
+  input[disabled] {
+    color: ${({ theme }) => theme.colors.grayscale.base};
+  }
+
   textarea {
-    height: 160px;
+    height: 300px;
     resize: none;
   }
 
@@ -233,6 +308,11 @@ const StyledInputContainer = styled.div`
     border: 1px solid ${({ theme }) => theme.colors.grayscale.light2};
     border-radius: ${({ theme }) => theme.gridUnit}px;
 
+    .ant-select-selection-placeholder,
+    .ant-select-selection-item {
+      line-height: 24px;
+    }
+
     &[name='description'] {
       flex: 1 1 auto;
     }
@@ -247,6 +327,15 @@ const StyledInputContainer = styled.div`
   }
 `;
 
+const StyledRadio = styled(Radio)`
+  display: block;
+  line-height: ${({ theme }) => theme.gridUnit * 7}px;
+`;
+
+const StyledRadioGroup = styled(Radio.Group)`
+  margin-left: ${({ theme }) => theme.gridUnit * 5.5}px;
+`;
+
 // Notification Method components
 const StyledNotificationAddButton = styled.div`
   color: ${({ theme }) => theme.colors.primary.dark1};
@@ -259,33 +348,6 @@ const StyledNotificationAddButton = styled.div`
   &.disabled {
     color: ${({ theme }) => theme.colors.grayscale.light1};
     cursor: default;
-  }
-`;
-
-const StyledNotificationMethod = styled.div`
-  margin-bottom: 10px;
-
-  .input-container {
-    textarea {
-      height: auto;
-    }
-  }
-
-  .inline-container {
-    margin-bottom: 10px;
-
-    .input-container {
-      margin-left: 10px;
-    }
-
-    > div {
-      margin: 0;
-    }
-
-    .delete-button {
-      margin-left: 10px;
-      padding-top: 3px;
-    }
   }
 `;
 
@@ -328,115 +390,6 @@ type NotificationSetting = {
   options: NotificationMethod[];
 };
 
-interface NotificationMethodProps {
-  setting?: NotificationSetting | null;
-  index: number;
-  onUpdate?: (index: number, updatedSetting: NotificationSetting) => void;
-  onRemove?: (index: number) => void;
-}
-
-const NotificationMethod: FunctionComponent<NotificationMethodProps> = ({
-  setting = null,
-  index,
-  onUpdate,
-  onRemove,
-}) => {
-  const { method, recipients, options } = setting || {};
-  const [recipientValue, setRecipientValue] = useState<string>(
-    recipients || '',
-  );
-
-  if (!setting) {
-    return null;
-  }
-
-  const onMethodChange = (method: NotificationMethod) => {
-    // Since we're swapping the method, reset the recipients
-    setRecipientValue('');
-
-    if (onUpdate) {
-      const updatedSetting = {
-        ...setting,
-        method,
-        recipients: '',
-      };
-
-      onUpdate(index, updatedSetting);
-    }
-  };
-
-  const onRecipientsChange = (
-    event: React.ChangeEvent<HTMLTextAreaElement>,
-  ) => {
-    const { target } = event;
-
-    setRecipientValue(target.value);
-
-    if (onUpdate) {
-      const updatedSetting = {
-        ...setting,
-        recipients: target.value,
-      };
-
-      onUpdate(index, updatedSetting);
-    }
-  };
-
-  // Set recipients
-  if (!!recipients && recipientValue !== recipients) {
-    setRecipientValue(recipients);
-  }
-
-  const methodOptions = (options || []).map((method: NotificationMethod) => {
-    return (
-      <Select.Option key={method} value={method}>
-        {t(method)}
-      </Select.Option>
-    );
-  });
-
-  return (
-    <StyledNotificationMethod>
-      <div className="inline-container">
-        <StyledInputContainer>
-          <div className="input-container">
-            <Select
-              onChange={onMethodChange}
-              placeholder="Select Delivery Method"
-              defaultValue={method}
-              value={method}
-            >
-              {methodOptions}
-            </Select>
-          </div>
-        </StyledInputContainer>
-        {method !== undefined && !!onRemove ? (
-          <span
-            role="button"
-            tabIndex={0}
-            className="delete-button"
-            onClick={() => onRemove(index)}
-          >
-            <Icon name="trash" />
-          </span>
-        ) : null}
-      </div>
-      {method !== undefined ? (
-        <StyledInputContainer>
-          <div className="control-label">{t(method)}</div>
-          <div className="input-container">
-            <textarea
-              name="recipients"
-              value={recipientValue}
-              onChange={onRecipientsChange}
-            />
-          </div>
-        </StyledInputContainer>
-      ) : null}
-    </StyledNotificationMethod>
-  );
-};
-
 const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   addDangerToast,
   onAdd,
@@ -446,23 +399,31 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   isReport = false,
 }) => {
   const [disableSave, setDisableSave] = useState<boolean>(true);
-  const [currentAlert, setCurrentAlert] = useState<AlertObject | null>();
+  const [
+    currentAlert,
+    setCurrentAlert,
+  ] = useState<Partial<AlertObject> | null>();
   const [isHidden, setIsHidden] = useState<boolean>(true);
   const [contentType, setContentType] = useState<string>('dashboard');
-  const [scheduleFormat, setScheduleFormat] = useState<string>(
-    'dropdown-format',
+  const [reportFormat, setReportFormat] = useState<string>(
+    DEFAULT_NOTIFICATION_FORMAT,
   );
 
   // Dropdown options
+  const [conditionNotNull, setConditionNotNull] = useState<boolean>(false);
   const [sourceOptions, setSourceOptions] = useState<MetaObject[]>([]);
   const [dashboardOptions, setDashboardOptions] = useState<MetaObject[]>([]);
   const [chartOptions, setChartOptions] = useState<MetaObject[]>([]);
 
   const isEditMode = alert !== null;
+  const formatOptionEnabled =
+    contentType === 'chart' &&
+    (isFeatureEnabled(FeatureFlag.ALERTS_ATTACH_REPORTS) || isReport);
 
-  const [notificationAddState, setNotificationAddState] = useState<
-    NotificationAddStatus
-  >('active');
+  const [
+    notificationAddState,
+    setNotificationAddState,
+  ] = useState<NotificationAddStatus>('active');
   const [notificationSettings, setNotificationSettings] = useState<
     NotificationSetting[]
   >([]);
@@ -509,12 +470,17 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
     fetchResource,
     createResource,
     updateResource,
+    clearError,
   } = useSingleViewResource<AlertObject>('report', t('report'), addDangerToast);
 
   // Functions
   const hide = () => {
+    clearError();
     setIsHidden(true);
     onHide();
+    setNotificationSettings([]);
+    setCurrentAlert({ ...DEFAULT_ALERT });
+    setNotificationAddState('active');
   };
 
   const onSave = () => {
@@ -534,16 +500,23 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
     const data: any = {
       ...currentAlert,
-      chart: contentType === 'chart' ? currentAlert?.chart?.value : undefined,
+      type: isReport ? 'Report' : 'Alert',
+      validator_type: conditionNotNull ? 'not null' : 'operator',
+      validator_config_json: conditionNotNull
+        ? {}
+        : currentAlert?.validator_config_json,
+      chart: contentType === 'chart' ? currentAlert?.chart?.value : null,
       dashboard:
-        contentType === 'dashboard'
-          ? currentAlert?.dashboard?.value
-          : undefined,
+        contentType === 'dashboard' ? currentAlert?.dashboard?.value : null,
       database: currentAlert?.database?.value,
       owners: (currentAlert?.owners || []).map(
         owner => (owner as MetaObject).value,
       ),
       recipients,
+      report_format:
+        contentType === 'dashboard'
+          ? DEFAULT_NOTIFICATION_FORMAT
+          : reportFormat || DEFAULT_NOTIFICATION_FORMAT,
     };
 
     if (data.recipients && !data.recipients.length) {
@@ -564,7 +537,11 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
         delete data.last_value;
         delete data.last_value_row_json;
 
-        updateResource(update_id, data).then(() => {
+        updateResource(update_id, data).then(response => {
+          if (!response) {
+            return;
+          }
+
           if (onAdd) {
             onAdd();
           }
@@ -575,6 +552,10 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
     } else if (currentAlert) {
       // Create
       createResource(data).then(response => {
+        if (!response) {
+          return;
+        }
+
         if (onAdd) {
           onAdd(response);
         }
@@ -586,26 +567,23 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
   // Fetch data to populate form dropdowns
   const loadOwnerOptions = (input = '') => {
-    const query = rison.encode({ filter: input });
+    const query = rison.encode({ filter: input, page_size: SELECT_PAGE_SIZE });
     return SupersetClient.get({
-      endpoint: `/api/v1/dashboard/related/owners?q=${query}`,
+      endpoint: `/api/v1/report/related/owners?q=${query}`,
     }).then(
-      response => {
-        return response.json.result.map((item: any) => ({
+      response =>
+        response.json.result.map((item: any) => ({
           value: item.value,
           label: item.text,
-        }));
-      },
-      badResponse => {
-        return [];
-      },
+        })),
+      badResponse => [],
     );
   };
 
   const loadSourceOptions = (input = '') => {
-    const query = rison.encode({ filter: input });
+    const query = rison.encode({ filter: input, page_size: SELECT_PAGE_SIZE });
     return SupersetClient.get({
-      endpoint: `/api/v1/dataset/related/database?q=${query}`,
+      endpoint: `/api/v1/report/related/database?q=${query}`,
     }).then(
       response => {
         const list = response.json.result.map((item: any) => ({
@@ -626,9 +604,7 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
         return list;
       },
-      badResponse => {
-        return [];
-      },
+      badResponse => [],
     );
   };
 
@@ -652,14 +628,14 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   };
 
   const loadDashboardOptions = (input = '') => {
-    const query = rison.encode({ filter: input });
+    const query = rison.encode({ filter: input, page_size: SELECT_PAGE_SIZE });
     return SupersetClient.get({
-      endpoint: `/api/v1/dashboard?q=${query}`,
+      endpoint: `/api/v1/report/related/dashboard?q=${query}`,
     }).then(
       response => {
         const list = response.json.result.map((item: any) => ({
-          value: item.id,
-          label: item.dashboard_title,
+          value: item.value,
+          label: item.text,
         }));
 
         setDashboardOptions(list);
@@ -675,9 +651,7 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
         return list;
       },
-      badResponse => {
-        return [];
-      },
+      badResponse => [],
     );
   };
 
@@ -701,14 +675,14 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   };
 
   const loadChartOptions = (input = '') => {
-    const query = rison.encode({ filter: input });
+    const query = rison.encode({ filter: input, page_size: SELECT_PAGE_SIZE });
     return SupersetClient.get({
-      endpoint: `/api/v1/chart?q=${query}`,
+      endpoint: `/api/v1/report/related/chart?q=${query}`,
     }).then(
       response => {
         const list = response.json.result.map((item: any) => ({
-          value: item.id,
-          label: item.slice_name,
+          value: item.value,
+          label: item.text,
         }));
 
         setChartOptions(list);
@@ -720,9 +694,7 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
         return list;
       },
-      badResponse => {
-        return [];
-      },
+      badResponse => [],
     );
   };
 
@@ -747,12 +719,10 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
   // Updating alert/report state
   const updateAlertState = (name: string, value: any) => {
-    const data = {
-      ...currentAlert,
-    };
-
-    data[name] = value;
-    setCurrentAlert(data);
+    setCurrentAlert(currentAlertData => ({
+      ...currentAlertData,
+      [name]: value,
+    }));
   };
 
   // Handle input/textarea updates
@@ -762,6 +732,27 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
     const { target } = event;
 
     updateAlertState(target.name, target.value);
+  };
+
+  const onTimeoutVerifyChange = (
+    event: React.ChangeEvent<HTMLTextAreaElement | HTMLInputElement>,
+  ) => {
+    const { target } = event;
+    const value = +target.value;
+
+    // Need to make sure grace period is not lower than TIMEOUT_MIN
+    if (value === 0) {
+      updateAlertState(target.name, null);
+    } else {
+      updateAlertState(
+        target.name,
+        value ? Math.max(value, TIMEOUT_MIN) : value,
+      );
+    }
+  };
+
+  const onSQLChange = (value: string) => {
+    updateAlertState('sql', value || '');
   };
 
   const onOwnersChange = (value: Array<Owner>) => {
@@ -774,10 +765,12 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
 
   const onDashboardChange = (dashboard: SelectValue) => {
     updateAlertState('dashboard', dashboard || undefined);
+    updateAlertState('chart', null);
   };
 
   const onChartChange = (chart: SelectValue) => {
     updateAlertState('chart', chart || undefined);
+    updateAlertState('dashboard', null);
   };
 
   const onActiveSwitch = (checked: boolean) => {
@@ -785,6 +778,8 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   };
 
   const onConditionChange = (op: Operator) => {
+    setConditionNotNull(op === 'not null');
+
     const config = {
       op,
       threshold: currentAlert
@@ -806,12 +801,6 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
     updateAlertState('validator_config_json', config);
   };
 
-  const onScheduleFormatChange = (event: any) => {
-    const { target } = event;
-
-    setScheduleFormat(target.value);
-  };
-
   const onLogRetentionChange = (retention: number) => {
     updateAlertState('log_retention', retention);
   };
@@ -820,6 +809,12 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
     const { target } = event;
 
     setContentType(target.value);
+  };
+
+  const onFormatChange = (event: any) => {
+    const { target } = event;
+
+    setReportFormat(target.value);
   };
 
   // Make sure notification settings has the required info
@@ -855,8 +850,9 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
       } else if (
         !!currentAlert.database &&
         currentAlert.sql?.length &&
-        !!currentAlert.validator_config_json?.op &&
-        currentAlert.validator_config_json?.threshold !== undefined
+        (conditionNotNull || !!currentAlert.validator_config_json?.op) &&
+        (conditionNotNull ||
+          currentAlert.validator_config_json?.threshold !== undefined)
       ) {
         setDisableSave(false);
       } else {
@@ -868,105 +864,114 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   };
 
   // Initialize
-  if (
-    isEditMode &&
-    (!currentAlert ||
-      !currentAlert.id ||
-      (alert && alert.id !== currentAlert.id) ||
-      (isHidden && show))
-  ) {
-    if (alert && alert.id !== null && !loading && !fetchError) {
-      const id = alert.id || 0;
+  useEffect(() => {
+    if (
+      isEditMode &&
+      (!currentAlert ||
+        !currentAlert.id ||
+        (alert && alert.id !== currentAlert.id) ||
+        (isHidden && show))
+    ) {
+      if (alert && alert.id !== null && !loading && !fetchError) {
+        const id = alert.id || 0;
+        fetchResource(id);
+      }
+    } else if (
+      !isEditMode &&
+      (!currentAlert || currentAlert.id || (isHidden && show))
+    ) {
+      setCurrentAlert({ ...DEFAULT_ALERT });
+      setNotificationSettings([]);
+      setNotificationAddState('active');
+    }
+  }, [alert]);
 
-      fetchResource(id).then(() => {
-        if (resource) {
-          // Add notification settings
-          const settings = (resource.recipients || []).map(setting => ({
-            method: setting.type as NotificationMethod,
-            // @ts-ignore: Type not assignable
-            recipients:
-              typeof setting.recipient_config_json === 'string'
-                ? (JSON.parse(setting.recipient_config_json) || {}).target
-                : setting.recipient_config_json,
-            options: NOTIFICATION_METHODS as NotificationMethod[], // Need better logic for this
-          }));
+  useEffect(() => {
+    if (resource) {
+      // Add notification settings
+      const settings = (resource.recipients || []).map(setting => {
+        const config =
+          typeof setting.recipient_config_json === 'string'
+            ? JSON.parse(setting.recipient_config_json)
+            : {};
+        return {
+          method: setting.type as NotificationMethod,
+          // @ts-ignore: Type not assignable
+          recipients: config.target || setting.recipient_config_json,
+          options: NOTIFICATION_METHODS as NotificationMethod[], // Need better logic for this
+        };
+      });
 
-          setNotificationSettings(settings);
-          setContentType(resource.chart ? 'chart' : 'dashboard');
+      setNotificationSettings(settings);
+      setNotificationAddState(
+        settings.length === NOTIFICATION_METHODS.length ? 'hidden' : 'active',
+      );
+      setContentType(resource.chart ? 'chart' : 'dashboard');
+      setReportFormat(
+        resource.chart
+          ? resource.report_format || DEFAULT_NOTIFICATION_FORMAT
+          : DEFAULT_NOTIFICATION_FORMAT,
+      );
+      const validatorConfig =
+        typeof resource.validator_config_json === 'string'
+          ? JSON.parse(resource.validator_config_json)
+          : resource.validator_config_json;
 
-          setCurrentAlert({
-            ...resource,
-            chart: resource.chart
-              ? getChartData(resource.chart) || { value: resource.chart.id }
-              : undefined,
-            dashboard: resource.dashboard
-              ? getDashboardData(resource.dashboard) || {
-                  value: resource.dashboard.id,
-                }
-              : undefined,
-            database: resource.database
-              ? getSourceData(resource.database) || {
-                  value: resource.database.id,
-                }
-              : undefined,
-            owners: (resource.owners || []).map(owner => ({
-              value: owner.id,
-              label: `${(owner as Owner).first_name} ${
-                (owner as Owner).last_name
-              }`,
-            })),
-            // @ts-ignore: Type not assignable
-            validator_config_json:
-              typeof resource.validator_config_json === 'string'
-                ? JSON.parse(resource.validator_config_json)
-                : resource.validator_config_json,
-          });
-        }
+      setConditionNotNull(resource.validator_type === 'not null');
+
+      setCurrentAlert({
+        ...resource,
+        chart: resource.chart
+          ? getChartData(resource.chart) || {
+              value: (resource.chart as ChartObject).id,
+              label: (resource.chart as ChartObject).slice_name,
+            }
+          : undefined,
+        dashboard: resource.dashboard
+          ? getDashboardData(resource.dashboard) || {
+              value: (resource.dashboard as DashboardObject).id,
+              label: (resource.dashboard as DashboardObject).dashboard_title,
+            }
+          : undefined,
+        database: resource.database
+          ? getSourceData(resource.database) || {
+              value: (resource.database as DatabaseObject).id,
+              label: (resource.database as DatabaseObject).database_name,
+            }
+          : undefined,
+        owners: (resource.owners || []).map(owner => ({
+          value: owner.id,
+          label: `${(owner as Owner).first_name} ${(owner as Owner).last_name}`,
+        })),
+        // @ts-ignore: Type not assignable
+        validator_config_json:
+          resource.validator_type === 'not null'
+            ? {
+                op: 'not null',
+              }
+            : validatorConfig,
       });
     }
-  } else if (
-    !isEditMode &&
-    (!currentAlert || currentAlert.id || (isHidden && show))
-  ) {
-    setCurrentAlert({
-      active: true,
-      crontab: '',
-      log_retention: DEFAULT_RETENTION,
-      working_timeout: DEFAULT_WORKING_TIMEOUT,
-      name: '',
-      owners: [],
-      recipients: [],
-      sql: '',
-      type: isReport ? 'Report' : 'Alert',
-      validator_config_json: {},
-      validator_type: 'not null',
-    });
-
-    setNotificationSettings([]);
-    setNotificationAddState('active');
-  }
+  }, [resource]);
 
   // Validation
-  useEffect(
-    () => {
-      validate();
-    },
-    currentAlert
-      ? [
-          currentAlert.name,
-          currentAlert.owners,
-          currentAlert.database,
-          currentAlert.sql,
-          currentAlert.validator_config_json,
-          currentAlert.crontab,
-          currentAlert.working_timeout,
-          currentAlert.dashboard,
-          currentAlert.chart,
-          contentType,
-          notificationSettings,
-        ]
-      : [],
-  );
+  const currentAlertSafe = currentAlert || {};
+  useEffect(() => {
+    validate();
+  }, [
+    currentAlertSafe.name,
+    currentAlertSafe.owners,
+    currentAlertSafe.database,
+    currentAlertSafe.sql,
+    currentAlertSafe.validator_config_json,
+    currentAlertSafe.crontab,
+    currentAlertSafe.working_timeout,
+    currentAlertSafe.dashboard,
+    currentAlertSafe.chart,
+    contentType,
+    notificationSettings,
+    conditionNotNull,
+  ]);
 
   // Show/hide
   if (isHidden && show) {
@@ -974,31 +979,35 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
   }
 
   // Dropdown options
-  const conditionOptions = CONDITIONS.map(condition => {
-    return (
-      <Select.Option value={condition.value}>{condition.label}</Select.Option>
-    );
-  });
+  const conditionOptions = CONDITIONS.map(condition => (
+    <Select.Option key={condition.value} value={condition.value}>
+      {condition.label}
+    </Select.Option>
+  ));
 
-  const retentionOptions = RETENTION_OPTIONS.map(option => {
-    return <Select.Option value={option.value}>{option.label}</Select.Option>;
-  });
+  const retentionOptions = RETENTION_OPTIONS.map(option => (
+    <Select.Option key={option.value} value={option.value}>
+      {option.label}
+    </Select.Option>
+  ));
 
   return (
-    <Modal
+    <StyledModal
       className="no-content-padding"
+      responsive
       disablePrimaryButton={disableSave}
       onHandledPrimaryAction={onSave}
       onHide={hide}
       primaryButtonName={isEditMode ? t('Save') : t('Add')}
       show={show}
       width="100%"
+      maxWidth="1450px"
       title={
         <h4 data-test="alert-report-modal-title">
           {isEditMode ? (
-            <StyledIcon name="edit-alt" />
+            <Icons.EditAlt css={StyledIcon} />
           ) : (
-            <StyledIcon name="plus-large" />
+            <Icons.PlusLarge css={StyledIcon} />
           )}
           {isEditMode
             ? t(`Edit ${isReport ? 'Report' : 'Alert'}`)
@@ -1010,7 +1019,7 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
         <div className="header-section">
           <StyledInputContainer>
             <div className="control-label">
-              {t('Alert Name')}
+              {isReport ? t('Report name') : t('Alert name')}
               <span className="required">*</span>
             </div>
             <div className="input-container">
@@ -1018,7 +1027,7 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
                 type="text"
                 name="name"
                 value={currentAlert ? currentAlert.name : ''}
-                placeholder={t('Alert Name')}
+                placeholder={isReport ? t('Report name') : t('Alert name')}
                 onChange={onTextChange}
               />
             </div>
@@ -1028,7 +1037,7 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
               {t('Owners')}
               <span className="required">*</span>
             </div>
-            <div className="input-container">
+            <div data-test="owners-select" className="input-container">
               <AsyncSelect
                 name="owners"
                 isMulti
@@ -1064,11 +1073,11 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
           {!isReport && (
             <div className="column condition">
               <StyledSectionTitle>
-                <h4>{t('Alert Condition')}</h4>
+                <h4>{t('Alert condition')}</h4>
               </StyledSectionTitle>
               <StyledInputContainer>
                 <div className="control-label">
-                  {t('Source')}
+                  {t('Database')}
                   <span className="required">*</span>
                 </div>
                 <div className="input-container">
@@ -1094,18 +1103,21 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
                   {t('SQL Query')}
                   <span className="required">*</span>
                 </div>
-                <div className="input-container">
-                  <textarea
-                    name="sql"
-                    value={currentAlert ? currentAlert.sql || '' : ''}
-                    onChange={onTextChange}
-                  />
-                </div>
+                <TextAreaControl
+                  name="sql"
+                  language="sql"
+                  offerEditInModal={false}
+                  minLines={15}
+                  maxLines={15}
+                  onChange={onSQLChange}
+                  readOnly={false}
+                  value={currentAlert ? currentAlert.sql : ''}
+                />
               </StyledInputContainer>
-              <div className="inline-container">
+              <div className="inline-container wrap">
                 <StyledInputContainer>
                   <div className="control-label">
-                    {t('Alert If...')}
+                    {t('Trigger Alert If...')}
                     <span className="required">*</span>
                   </div>
                   <div className="input-container">
@@ -1136,9 +1148,13 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
                     <input
                       type="number"
                       name="threshold"
+                      disabled={conditionNotNull}
                       value={
-                        currentAlert && currentAlert.validator_config_json
-                          ? currentAlert.validator_config_json.threshold || ''
+                        currentAlert &&
+                        currentAlert.validator_config_json &&
+                        currentAlert.validator_config_json.threshold !==
+                          undefined
+                          ? currentAlert.validator_config_json.threshold
                           : ''
                       }
                       placeholder={t('Value')}
@@ -1151,40 +1167,25 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
           )}
           <div className="column schedule">
             <StyledSectionTitle>
-              <h4>{t('Alert Condition Schedule')}</h4>
+              <h4>
+                {isReport
+                  ? t('Report schedule')
+                  : t('Alert condition schedule')}
+              </h4>
+              <span className="required">*</span>
             </StyledSectionTitle>
-            <Radio.Group
-              onChange={onScheduleFormatChange}
-              value={scheduleFormat}
-            >
-              <div className="inline-container add-margin">
-                <Radio value="dropdown-format" />
-                <span className="input-label">
-                  Every x Minutes (should be set of dropdown options)
-                </span>
-              </div>
-              <div className="inline-container add-margin">
-                <Radio value="cron-format" />
-                <span className="input-label">CRON Schedule</span>
-                <StyledInputContainer className="styled-input">
-                  <div className="input-container">
-                    <input
-                      type="text"
-                      name="crontab"
-                      value={currentAlert ? currentAlert.crontab || '' : ''}
-                      placeholder={t('CRON Expression')}
-                      onChange={onTextChange}
-                    />
-                  </div>
-                </StyledInputContainer>
-              </div>
-            </Radio.Group>
+            <AlertReportCronScheduler
+              value={
+                (currentAlert && currentAlert.crontab) || DEFAULT_CRON_VALUE
+              }
+              onChange={newVal => updateAlertState('crontab', newVal)}
+            />
             <StyledSectionTitle>
-              <h4>{t('Schedule Settings')}</h4>
+              <h4>{t('Schedule settings')}</h4>
             </StyledSectionTitle>
             <StyledInputContainer>
               <div className="control-label">
-                {t('Log Retention')}
+                {t('Log retention')}
                 <span className="required">*</span>
               </div>
               <div className="input-container">
@@ -1208,44 +1209,58 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
             </StyledInputContainer>
             <StyledInputContainer>
               <div className="control-label">
-                {t('Working Timeout')}
+                {t('Working timeout')}
                 <span className="required">*</span>
               </div>
               <div className="input-container">
                 <input
                   type="number"
+                  min="1"
                   name="working_timeout"
-                  value={currentAlert ? currentAlert.working_timeout : ''}
+                  value={currentAlert?.working_timeout || ''}
                   placeholder={t('Time in seconds')}
-                  onChange={onTextChange}
+                  onChange={onTimeoutVerifyChange}
                 />
                 <span className="input-label">seconds</span>
               </div>
             </StyledInputContainer>
-            <StyledInputContainer>
-              <div className="control-label">{t('Grace Period')}</div>
-              <div className="input-container">
-                <input
-                  type="number"
-                  name="grace_period"
-                  value={currentAlert ? currentAlert.grace_period : ''}
-                  placeholder={t('Time in seconds')}
-                  onChange={onTextChange}
-                />
-                <span className="input-label">seconds</span>
-              </div>
-            </StyledInputContainer>
+            {!isReport && (
+              <StyledInputContainer>
+                <div className="control-label">{t('Grace period')}</div>
+                <div className="input-container">
+                  <input
+                    type="number"
+                    min="1"
+                    name="grace_period"
+                    value={currentAlert?.grace_period || ''}
+                    placeholder={t('Time in seconds')}
+                    onChange={onTimeoutVerifyChange}
+                  />
+                  <span className="input-label">seconds</span>
+                </div>
+              </StyledInputContainer>
+            )}
           </div>
           <div className="column message">
             <StyledSectionTitle>
-              <h4>{t('Message Content')}</h4>
+              <h4>{t('Message content')}</h4>
+              <span className="required">*</span>
             </StyledSectionTitle>
-            <div className="inline-container add-margin">
-              <Radio.Group onChange={onContentTypeChange} value={contentType}>
-                <Radio value="dashboard">Dashboard</Radio>
-                <Radio value="chart">Chart</Radio>
-              </Radio.Group>
-            </div>
+            <Radio.Group onChange={onContentTypeChange} value={contentType}>
+              <StyledRadio value="dashboard">{t('Dashboard')}</StyledRadio>
+              <StyledRadio value="chart">{t('Chart')}</StyledRadio>
+            </Radio.Group>
+            {formatOptionEnabled && (
+              <div className="inline-container">
+                <StyledRadioGroup
+                  onChange={onFormatChange}
+                  value={reportFormat}
+                >
+                  <StyledRadio value="PNG">{t('Send as PNG')}</StyledRadio>
+                  <StyledRadio value="CSV">{t('Send as CSV')}</StyledRadio>
+                </StyledRadioGroup>
+              </div>
+            )}
             <AsyncSelect
               className={
                 contentType === 'chart'
@@ -1287,28 +1302,26 @@ const AlertReportModal: FunctionComponent<AlertReportModalProps> = ({
               onChange={onDashboardChange}
             />
             <StyledSectionTitle>
-              <h4>{t('Notification Method')}</h4>
+              <h4>{t('Notification method')}</h4>
+              <span className="required">*</span>
             </StyledSectionTitle>
-            <NotificationMethod
-              setting={notificationSettings[0]}
-              index={0}
-              onUpdate={updateNotificationSetting}
-              onRemove={removeNotificationSetting}
-            />
-            <NotificationMethod
-              setting={notificationSettings[1]}
-              index={1}
-              onUpdate={updateNotificationSetting}
-              onRemove={removeNotificationSetting}
-            />
+            {notificationSettings.map((notificationSetting, i) => (
+              <NotificationMethod
+                setting={notificationSetting}
+                index={i}
+                onUpdate={updateNotificationSetting}
+                onRemove={removeNotificationSetting}
+              />
+            ))}
             <NotificationMethodAdd
+              data-test="notification-add"
               status={notificationAddState}
               onClick={onNotificationAdd}
             />
           </div>
         </div>
       </StyledSectionContainer>
-    </Modal>
+    </StyledModal>
   );
 };
 
